@@ -32,6 +32,14 @@ These are targets, not a service-level agreement.
 Security fixes are provided for the most recent tagged release. Operators should
 keep Node.js and locked dependencies current.
 
+## Supply-chain controls
+
+- Dependencies are locked with `package-lock.json`.
+- CI uses `npm ci` and fails on high-severity dependency advisories.
+- GitHub Actions are pinned to immutable commit SHAs.
+- Code scanning runs on pushes, pull requests, and a weekly schedule.
+- `npm run package:release` produces source and SBOM SHA-256 checksums.
+
 ## Security boundaries
 
 OpenVC OS is local-first, but local-first does not mean automatically secure.

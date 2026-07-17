@@ -63,7 +63,11 @@ npm run package:release
 `npm test` proves that a fresh database is empty, checks the authentication and
 CSRF boundary, verifies that the connector registry is empty, scans source files
 for credentials and private paths, tests an authenticated encrypted-backup
-round trip, rejects a modified backup, and builds the web application.
+round trip, rejects a modified backup, validates cross-organization isolation,
+generates a CycloneDX software bill of materials, and builds the web application.
+
+Release packaging creates a source archive, SHA-256 checksums, and a CycloneDX
+SBOM under the ignored `releases/` directory. Runtime data is never included.
 
 ## Encrypted backups
 

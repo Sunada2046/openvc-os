@@ -91,6 +91,16 @@ try {
   const cookie = setup.response.headers.get("set-cookie")?.split(";")[0] || "";
   const csrf = setup.payload.csrfToken;
   assert.ok(cookie && csrf);
+  await request("/api/setup/bootstrap", {
+    method: "POST",
+    body: {
+      organizationName: "Second Organization",
+      adminName: "Second Administrator",
+      email: "second@example.test",
+      password: "OpenVC-Second-Test-2026",
+    },
+    expected: 409,
+  });
 
   const connectors = await request("/api/connectors", { cookie });
   assert.deepEqual(connectors.payload.items, []);
@@ -114,6 +124,46 @@ try {
   });
   assert.equal(created.payload.item.name, "Synthetic Test Fund");
 
+  await request("/api/documents", {
+    method: "POST",
+    body: { fileName: "invalid.txt", contentBase64: "not-valid-base64" },
+    cookie,
+    csrf,
+    expected: 400,
+  });
+  const writableDb = new DatabaseSync(dbPath);
+  writableDb.exec(`
+    INSERT INTO organizations (id, name, slug)
+    VALUES ('other_org', 'Other Organization', 'other-organization');
+    INSERT INTO accounts (id, organization_id, email, name)
+    VALUES ('other_account', 'other_org', 'other@example.test', 'Other Account');
+    INSERT INTO objects (id, organization_id, object_type, name, created_by)
+    VALUES ('other_object', 'other_org', 'deal', 'Other Object', 'other_account');
+  `);
+  writableDb.close();
+  await request("/api/documents", {
+    method: "POST",
+    body: {
+      objectId: "other_object",
+      fileName: "cross-tenant.txt",
+      contentBase64: Buffer.from("blocked").toString("base64"),
+    },
+    cookie,
+    csrf,
+    expected: 404,
+  });
+  await request("/api/documents", {
+    method: "POST",
+    body: {
+      objectId: created.payload.item.id,
+      fileName: "local-note.txt",
+      contentBase64: Buffer.from("local only").toString("base64"),
+    },
+    cookie,
+    csrf,
+    expected: 201,
+  });
+
   await request("/api/connectors", {
     method: "POST",
     body: { name: "User connector", connectorType: "custom", manifest: {} },
@@ -128,8 +178,24 @@ try {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   assert.equal(Number(db.prepare("SELECT COUNT(*) AS count FROM connectors").get().count), 1);
   assert.equal(Number(db.prepare("SELECT COUNT(*) AS count FROM connector_secrets").get().count), 0);
+  const document = db.prepare("SELECT storage_path FROM documents").get();
+  assert.equal(document.storage_path.startsWith("/"), false);
   db.close();
-  console.log("API smoke test passed: local setup, authentication, CSRF, empty registry, and disabled connector.");
+
+  await request("/api/auth/logout", {
+    method: "POST",
+    cookie,
+    expected: 403,
+  });
+  await request("/api/auth/logout", {
+    method: "POST",
+    cookie,
+    csrf,
+  });
+  await request("/api/auth/me", { cookie, expected: 401 });
+  console.log(
+    "API smoke test passed: setup lock, authentication, CSRF, tenant-scoped uploads, and disabled connectors.",
+  );
 } finally {
   if (server.exitCode === null) {
     server.kill("SIGTERM");

@@ -156,3 +156,135 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 CREATE INDEX IF NOT EXISTS idx_audit_org_time
   ON audit_logs (organization_id, created_at DESC);
+
+CREATE TRIGGER IF NOT EXISTS enforce_account_role_organization
+BEFORE INSERT ON account_roles
+WHEN (
+  SELECT organization_id FROM accounts WHERE id = NEW.account_id
+) <> (
+  SELECT organization_id FROM roles WHERE id = NEW.role_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'account and role must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_account_role_organization_update
+BEFORE UPDATE ON account_roles
+WHEN (
+  SELECT organization_id FROM accounts WHERE id = NEW.account_id
+) <> (
+  SELECT organization_id FROM roles WHERE id = NEW.role_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'account and role must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_object_creator_organization
+BEFORE INSERT ON objects
+WHEN NEW.organization_id <> (
+  SELECT organization_id FROM accounts WHERE id = NEW.created_by
+)
+BEGIN
+  SELECT RAISE(ABORT, 'object creator must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_object_creator_organization_update
+BEFORE UPDATE OF organization_id, created_by ON objects
+WHEN NEW.organization_id <> (
+  SELECT organization_id FROM accounts WHERE id = NEW.created_by
+)
+BEGIN
+  SELECT RAISE(ABORT, 'object creator must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_relation_organization
+BEFORE INSERT ON relations
+WHEN NEW.organization_id <> (
+  SELECT organization_id FROM objects WHERE id = NEW.source_id
+) OR NEW.organization_id <> (
+  SELECT organization_id FROM objects WHERE id = NEW.target_id
+) OR NEW.organization_id <> (
+  SELECT organization_id FROM accounts WHERE id = NEW.created_by
+)
+BEGIN
+  SELECT RAISE(ABORT, 'relation endpoints and creator must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_relation_organization_update
+BEFORE UPDATE OF organization_id, source_id, target_id, created_by ON relations
+WHEN NEW.organization_id <> (
+  SELECT organization_id FROM objects WHERE id = NEW.source_id
+) OR NEW.organization_id <> (
+  SELECT organization_id FROM objects WHERE id = NEW.target_id
+) OR NEW.organization_id <> (
+  SELECT organization_id FROM accounts WHERE id = NEW.created_by
+)
+BEGIN
+  SELECT RAISE(ABORT, 'relation endpoints and creator must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_connector_creator_organization
+BEFORE INSERT ON connectors
+WHEN NEW.organization_id <> (
+  SELECT organization_id FROM accounts WHERE id = NEW.created_by
+)
+BEGIN
+  SELECT RAISE(ABORT, 'connector creator must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_connector_creator_organization_update
+BEFORE UPDATE OF organization_id, created_by ON connectors
+WHEN NEW.organization_id <> (
+  SELECT organization_id FROM accounts WHERE id = NEW.created_by
+)
+BEGIN
+  SELECT RAISE(ABORT, 'connector creator must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_document_organization
+BEFORE INSERT ON documents
+WHEN NEW.organization_id <> (
+  SELECT organization_id FROM accounts WHERE id = NEW.uploaded_by
+) OR (
+  NEW.object_id IS NOT NULL AND NEW.organization_id <> (
+    SELECT organization_id FROM objects WHERE id = NEW.object_id
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'document, object, and uploader must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_document_organization_update
+BEFORE UPDATE OF organization_id, object_id, uploaded_by ON documents
+WHEN NEW.organization_id <> (
+  SELECT organization_id FROM accounts WHERE id = NEW.uploaded_by
+) OR (
+  NEW.object_id IS NOT NULL AND NEW.organization_id <> (
+    SELECT organization_id FROM objects WHERE id = NEW.object_id
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'document, object, and uploader must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_audit_actor_organization
+BEFORE INSERT ON audit_logs
+WHEN NEW.actor_account_id IS NOT NULL
+  AND NEW.organization_id IS NOT NULL
+  AND NEW.organization_id <> (
+    SELECT organization_id FROM accounts WHERE id = NEW.actor_account_id
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'audit actor must belong to the same organization');
+END;
+
+CREATE TRIGGER IF NOT EXISTS enforce_audit_actor_organization_update
+BEFORE UPDATE OF organization_id, actor_account_id ON audit_logs
+WHEN NEW.actor_account_id IS NOT NULL
+  AND NEW.organization_id IS NOT NULL
+  AND NEW.organization_id <> (
+    SELECT organization_id FROM accounts WHERE id = NEW.actor_account_id
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'audit actor must belong to the same organization');
+END;
