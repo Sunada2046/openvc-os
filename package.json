@@ -1,0 +1,31 @@
+{
+  "name": "openvc-os",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Privacy-first, local-first open source operating system for venture capital teams.",
+  "license": "Apache-2.0",
+  "packageManager": "npm@11.11.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "npm run dev --workspace @openvc/web",
+    "dev:api": "npm run dev --workspace @openvc/api",
+    "build": "npm run build --workspace @openvc/web",
+    "typecheck": "npm run typecheck --workspace @openvc/web",
+    "lint": "npm run lint --workspace @openvc/web",
+    "db:init": "node packages/db/scripts/init.mjs",
+    "test:clean-init": "node scripts/clean-init-test.mjs",
+    "test:security": "node scripts/security-audit.mjs",
+    "test:api": "node scripts/api-smoke-test.mjs",
+    "test:backup": "node scripts/encrypted-backup-test.mjs",
+    "backup:encrypted": "node scripts/backup-encrypted.mjs",
+    "restore:encrypted": "node scripts/restore-encrypted.mjs",
+    "test": "npm run test:clean-init && npm run test:security && npm run test:api && npm run test:backup && npm run typecheck && npm run build",
+    "package:release": "node scripts/package-release.mjs"
+  }
+}

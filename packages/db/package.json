@@ -1,0 +1,9 @@
+{
+  "name": "@openvc/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "init": "node scripts/init.mjs"
+  }
+}
