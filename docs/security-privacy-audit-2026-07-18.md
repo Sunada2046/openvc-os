@@ -148,5 +148,7 @@ unsafe network configuration, tenant isolation, API abuse cases, encrypted
 backup attacks, release privacy, SBOM generation, TypeScript checking, and the
 production web build.
 
-The patched commit still requires a fresh GitHub CI and CodeQL run after it is
-pushed. A passing local test does not replace protected remote verification.
+GitHub CI on Node 22 and CodeQL both passed on pull request 2 after the
+Node-version compatibility correction. CI fetches complete history so the
+history privacy scan is not reduced to a shallow checkout. A passing check still
+does not replace branch protection or human review.
