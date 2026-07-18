@@ -86,7 +86,11 @@ for (const directory of [storageDir, dirname(dbPath), uploadDir]) {
 
 const db = new DatabaseSync(dbPath);
 db.exec(readFileSync(resolve(root, "packages/db/schema.sql"), "utf8"));
-db.enableDefensive(true);
+if (typeof db.enableDefensive === "function") {
+  db.enableDefensive(true);
+} else {
+  db.exec("PRAGMA trusted_schema = OFF;");
+}
 chmodSync(dbPath, 0o600);
 
 const permissions = [
