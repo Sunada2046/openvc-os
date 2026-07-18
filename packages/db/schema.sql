@@ -288,3 +288,26 @@ WHEN NEW.actor_account_id IS NOT NULL
 BEGIN
   SELECT RAISE(ABORT, 'audit actor must belong to the same organization');
 END;
+
+DROP TRIGGER IF EXISTS enforce_audit_log_immutable_update;
+CREATE TRIGGER enforce_audit_log_immutable_update
+BEFORE UPDATE ON audit_logs
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.organization_id IS NOT OLD.organization_id
+  OR NEW.actor_account_id IS NOT OLD.actor_account_id
+  OR NEW.action IS NOT OLD.action
+  OR NEW.target_type IS NOT OLD.target_type
+  OR NEW.target_id IS NOT OLD.target_id
+  OR NEW.result IS NOT OLD.result
+  OR NEW.metadata_json IS NOT OLD.metadata_json
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN
+  SELECT RAISE(ABORT, 'audit logs are append-only');
+END;
+
+DROP TRIGGER IF EXISTS enforce_audit_log_immutable_delete;
+CREATE TRIGGER enforce_audit_log_immutable_delete
+BEFORE DELETE ON audit_logs
+BEGIN
+  SELECT RAISE(ABORT, 'audit logs are append-only');
+END;

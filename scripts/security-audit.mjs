@@ -26,7 +26,10 @@ function walk(directory) {
     if (!sourceExtensions.has(extension(path)) && name !== ".gitignore") continue;
     const content = readFileSync(path, "utf8");
     const relativePath = relative(root, path);
-    if (relativePath === "scripts/security-audit.mjs") continue;
+    if ([
+      "scripts/security-audit.mjs",
+      "scripts/git-history-audit.mjs",
+    ].includes(relativePath)) continue;
     const rules = [
       ["private key", /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/],
       ["OpenAI-style secret", /\bsk-[A-Za-z0-9_-]{24,}\b/],

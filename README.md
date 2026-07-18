@@ -9,7 +9,8 @@ connectors entirely under the operator's control.
 
 - The database starts with zero records.
 - There is no default account or password.
-- First-time setup is accepted only from the local device.
+- First-time setup is accepted only from the local device and requires a
+  one-time setup token printed by the API process.
 - The API binds to `127.0.0.1` unless the operator explicitly changes it.
 - The connector registry starts empty and disabled.
 - The core does not make outbound network calls.
@@ -32,7 +33,7 @@ to build its own data structure.
 
 ## Requirements
 
-- Node.js 22 or newer
+- Node.js 22.16 or newer
 - npm 11 or newer
 
 ## Local start
@@ -50,7 +51,9 @@ npm run dev
 ```
 
 Open `http://127.0.0.1:5173`. The first screen creates the organization and
-administrator locally. No external service is contacted.
+administrator locally. Enter the one-time setup token printed by
+`npm run dev:api`. No external service is contacted. Treat that token as a
+temporary credential and do not paste it into tickets, chat, or screenshots.
 
 ## Verification
 
@@ -62,8 +65,9 @@ npm run package:release
 
 `npm test` proves that a fresh database is empty, checks the authentication and
 CSRF boundary, verifies that the connector registry is empty, scans source files
-for credentials and private paths, tests an authenticated encrypted-backup
-round trip, rejects a modified backup, validates cross-organization isolation,
+and Git history for credentials and private paths, rejects unsafe network
+configuration, tests an authenticated encrypted-backup round trip, rejects
+modified or link-bearing backups, validates cross-organization isolation,
 generates a CycloneDX software bill of materials, and builds the web application.
 
 Release packaging creates a source archive, SHA-256 checksums, and a CycloneDX
@@ -109,7 +113,10 @@ external record identifiers, or personal data.
 
 Read [SECURITY.md](SECURITY.md), the [threat model](docs/threat-model.md), and
 the [deployment guide](docs/private-deployment.md) before exposing the service
-beyond a single device.
+beyond a single device. The [privacy and data lifecycle guide](docs/privacy.md)
+covers classification, minimization, retention, deletion, backups, and connector
+boundaries. The [2026-07-18 security and privacy audit](docs/security-privacy-audit-2026-07-18.md)
+records verified controls, remediated findings, and production prerequisites.
 
 ## License
 

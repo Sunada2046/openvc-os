@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createCipheriv, randomBytes, scryptSync } from "node:crypto";
+import { backup, DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
 import { basename, dirname, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -46,7 +47,12 @@ try {
       : null,
   };
 
-  execFileSync("cp", ["-p", dbPath, resolve(stagingDirectory, "openvc.sqlite")]);
+  const sourceDatabase = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    await backup(sourceDatabase, resolve(stagingDirectory, "openvc.sqlite"));
+  } finally {
+    sourceDatabase.close();
+  }
   if (manifest.uploads) {
     execFileSync("cp", ["-R", uploadDir, resolve(stagingDirectory, "uploads")]);
   }
@@ -64,7 +70,9 @@ try {
   );
 
   const archivePath = resolve(temporaryDirectory, "payload.tar.gz");
-  execFileSync("tar", ["-czf", archivePath, "-C", stagingDirectory, "."]);
+  execFileSync("tar", ["-czf", archivePath, "-C", stagingDirectory, "."], {
+    env: { ...process.env, COPYFILE_DISABLE: "1" },
+  });
   const plaintext = readFileSync(archivePath);
   const salt = randomBytes(16);
   const iv = randomBytes(12);

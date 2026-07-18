@@ -10,7 +10,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.16.0"
   },
   "scripts": {
     "dev": "npm run dev --workspace @openvc/web",
@@ -21,13 +21,16 @@
     "db:init": "node packages/db/scripts/init.mjs",
     "test:clean-init": "node scripts/clean-init-test.mjs",
     "test:security": "node scripts/security-audit.mjs",
+    "test:history": "node scripts/git-history-audit.mjs",
+    "test:network": "node scripts/network-config-test.mjs",
     "test:api": "node scripts/api-smoke-test.mjs",
     "test:tenant": "node scripts/tenant-isolation-test.mjs",
     "test:backup": "node scripts/encrypted-backup-test.mjs",
+    "test:release-privacy": "node scripts/release-privacy-test.mjs",
     "test:sbom": "node scripts/generate-sbom.mjs",
     "backup:encrypted": "node scripts/backup-encrypted.mjs",
     "restore:encrypted": "node scripts/restore-encrypted.mjs",
-    "test": "npm run test:clean-init && npm run test:security && npm run test:tenant && npm run test:api && npm run test:backup && npm run test:sbom && npm run typecheck && npm run build",
+    "test": "npm run test:clean-init && npm run test:security && npm run test:history && npm run test:network && npm run test:tenant && npm run test:api && npm run test:backup && npm run test:release-privacy && npm run test:sbom && npm run typecheck && npm run build",
     "package:release": "node scripts/package-release.mjs && node scripts/generate-sbom.mjs"
   }
 }

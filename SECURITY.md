@@ -35,9 +35,11 @@ keep Node.js and locked dependencies current.
 ## Supply-chain controls
 
 - Dependencies are locked with `package-lock.json`.
-- CI uses `npm ci` and fails on high-severity dependency advisories.
+- CI uses `npm ci`, fails on moderate-or-higher dependency advisories, and
+  verifies available registry signatures and provenance attestations.
 - GitHub Actions are pinned to immutable commit SHAs.
 - Code scanning runs on pushes, pull requests, and a weekly schedule.
+- Dependabot security updates and private vulnerability reporting are enabled.
 - `npm run package:release` produces source and SBOM SHA-256 checksums.
 
 ## Security boundaries
