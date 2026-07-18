@@ -200,7 +200,10 @@ export function App() {
         </nav>
         <div className="privacy-state">
           <ShieldCheck size={17} />
-          <div><strong>Local-only core</strong><span>No connector is installed</span></div>
+          <div>
+            <strong>{bootstrap?.setup.network.boundToLoopback ? "Local-only core" : "Network deployment"}</strong>
+            <span>No connector is installed</span>
+          </div>
         </div>
         <div className="account">
           <div className="avatar">{auth.account.name.slice(0, 1).toUpperCase()}</div>
@@ -215,7 +218,10 @@ export function App() {
             <span className="eyebrow">OpenVC workspace</span>
             <h1>{modules.find((module) => module.id === screen)?.label}</h1>
           </div>
-          <div className="security-chip"><ShieldCheck size={15} /> Loopback only</div>
+          <div className="security-chip">
+            <ShieldCheck size={15} />
+            {bootstrap?.setup.network.boundToLoopback ? "Loopback only" : "Network binding active"}
+          </div>
         </header>
         <div className="page">
           {screen === "dashboard" && bootstrap && (
@@ -247,7 +253,13 @@ function LoadingScreen() {
 }
 
 function SetupScreen({ onComplete }: { onComplete: (auth: AuthState) => Promise<void> }) {
-  const [form, setForm] = useState({ organizationName: "", adminName: "", email: "", password: "" });
+  const [form, setForm] = useState({
+    organizationName: "",
+    adminName: "",
+    email: "",
+    password: "",
+    setupToken: "",
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   return (
@@ -275,6 +287,8 @@ function SetupScreen({ onComplete }: { onComplete: (auth: AuthState) => Promise<
         <label>Your name<input required value={form.adminName} onChange={(event) => setForm({ ...form, adminName: event.target.value })} /></label>
         <label>Email<input autoComplete="email" required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
         <label>Password<input autoComplete="new-password" minLength={12} required type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
+        <label>One-time setup token<input autoComplete="off" required value={form.setupToken} onChange={(event) => setForm({ ...form, setupToken: event.target.value })} /></label>
+        <small>The API prints this token once in the terminal when the empty workspace starts.</small>
         <small>At least 12 characters with uppercase, lowercase and a number.</small>
         {error && <div className="error">{error}</div>}
         <button className="button primary full" disabled={busy} type="submit">{busy ? "Creating workspace…" : "Create workspace"}</button>
@@ -399,7 +413,13 @@ function ObjectModule({ objectType, label, canEdit, onChanged }: {
           <div className="record-list">
             <div className="record-head"><span>Name</span><span>Status</span><span>Updated</span><span /></div>
             {items.map((item) => (
-              <button className="record-row" key={item.id} onClick={() => setSelected(item)} type="button">
+              <button className="record-row" key={item.id} onClick={() => {
+                void api<{ item: CoreObject }>(`/api/objects/${objectType}/${encodeURIComponent(item.id)}`)
+                  .then((result) => setSelected(result.item))
+                  .catch((nextError) => {
+                    setError(nextError instanceof Error ? nextError.message : "Unable to open record.");
+                  });
+              }} type="button">
                 <strong>{item.name}</strong><span><i className="status-dot" />{item.status}</span><span>{new Date(item.updatedAt).toLocaleDateString()}</span><span className="open-link">Open</span>
               </button>
             ))}

@@ -1,11 +1,14 @@
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createCipheriv, randomBytes, scryptSync } from "node:crypto";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
@@ -75,7 +78,61 @@ try {
     tamperRejected = true;
   }
   if (!tamperRejected) throw new Error("Tampered backup was accepted.");
-  process.stdout.write("Encrypted backup test passed: round trip and tamper rejection.\n");
+
+  const maliciousPayload = resolve(testRoot, "malicious-payload");
+  const maliciousUploads = resolve(maliciousPayload, "uploads");
+  const externalTarget = resolve(testRoot, "external-target");
+  mkdirSync(maliciousUploads, { recursive: true });
+  mkdirSync(externalTarget);
+  execFileSync("cp", [
+    resolve(storageDir, "openvc.sqlite"),
+    resolve(maliciousPayload, "openvc.sqlite"),
+  ]);
+  writeFileSync(
+    resolve(maliciousPayload, "manifest.json"),
+    JSON.stringify({
+      format: "openvc-encrypted-backup",
+      version: 1,
+      database: "openvc.sqlite",
+      uploads: "uploads",
+      connectorSecretsKey: null,
+    }),
+  );
+  symlinkSync(externalTarget, resolve(maliciousUploads, "org_test"), "dir");
+  const maliciousArchive = resolve(testRoot, "malicious.tar.gz");
+  execFileSync("tar", ["-czf", maliciousArchive, "-C", maliciousPayload, "."]);
+  const plaintext = readFileSync(maliciousArchive);
+  const salt = randomBytes(16);
+  const iv = randomBytes(12);
+  const key = scryptSync(passphrase, salt, 32);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const maliciousBackup = resolve(testRoot, "malicious.ovcbak");
+  writeFileSync(maliciousBackup, Buffer.concat([
+    Buffer.from("OPENVCBK1"),
+    salt,
+    iv,
+    cipher.getAuthTag(),
+    ciphertext,
+  ]));
+  let symlinkRejected = false;
+  try {
+    execFileSync(
+      process.execPath,
+      [
+        resolve(root, "scripts/restore-encrypted.mjs"),
+        `--file=${maliciousBackup}`,
+        "--confirm-replace-storage",
+      ],
+      { cwd: root, env: environment, stdio: "pipe" },
+    );
+  } catch {
+    symlinkRejected = true;
+  }
+  if (!symlinkRejected) throw new Error("Backup containing a symbolic link was accepted.");
+  process.stdout.write(
+    "Encrypted backup test passed: consistent snapshot, round trip, tamper rejection, and link rejection.\n",
+  );
 } finally {
   rmSync(testRoot, { recursive: true, force: true });
 }

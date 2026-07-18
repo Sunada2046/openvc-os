@@ -1,8 +1,10 @@
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -58,14 +60,58 @@ mkdirSync(extractedDirectory, { mode: 0o700 });
 
 try {
   writeFileSync(archivePath, plaintext, { mode: 0o600 });
-  const entries = execFileSync("tar", ["-tzf", archivePath], { encoding: "utf8" })
+  const tarEnvironment = { ...process.env, COPYFILE_DISABLE: "1" };
+  const entries = execFileSync("tar", ["-tzf", archivePath], {
+    encoding: "utf8",
+    env: tarEnvironment,
+  })
     .split(/\r?\n/)
     .filter(Boolean);
-  if (entries.some((entry) =>
-    entry.startsWith("/") || entry.split("/").some((part) => part === ".."))) {
+  const normalizedEntries = entries.map((entry) =>
+    entry.replace(/^\.\//, "").replace(/\/$/, "")).filter(Boolean);
+  if (
+    entries.length > 100_000 ||
+    normalizedEntries.some((entry) =>
+      !entry ||
+      entry.startsWith("/") ||
+      entry.split("/").some((part) => part === "..") ||
+      !(
+        entry === "manifest.json" ||
+        entry === "openvc.sqlite" ||
+        entry === "connector-secrets.key" ||
+        entry === "uploads" ||
+        entry.startsWith("uploads/")
+      ))
+  ) {
     throw new Error("Backup contains an unsafe archive path.");
   }
-  execFileSync("tar", ["-xzf", archivePath, "-C", extractedDirectory]);
+  const verboseEntries = execFileSync("tar", ["-tvzf", archivePath], {
+    encoding: "utf8",
+    env: tarEnvironment,
+  }).split(/\r?\n/).filter(Boolean);
+  if (verboseEntries.some((entry) => !["-", "d"].includes(entry.trimStart()[0]))) {
+    throw new Error("Backup contains a link or unsupported archive entry.");
+  }
+  execFileSync("tar", ["-xzf", archivePath, "-C", extractedDirectory], {
+    env: tarEnvironment,
+  });
+
+  function secureExtractedTree(directory) {
+    for (const name of readdirSync(directory)) {
+      const path = resolve(directory, name);
+      const stats = lstatSync(path);
+      if (stats.isSymbolicLink() || (!stats.isDirectory() && !stats.isFile())) {
+        throw new Error("Backup extracted an unsupported filesystem entry.");
+      }
+      if (stats.isDirectory()) {
+        chmodSync(path, 0o700);
+        secureExtractedTree(path);
+      } else {
+        chmodSync(path, 0o600);
+      }
+    }
+  }
+  secureExtractedTree(extractedDirectory);
   const manifestPath = resolve(extractedDirectory, "manifest.json");
   const databasePath = resolve(extractedDirectory, "openvc.sqlite");
   if (!existsSync(manifestPath) || !existsSync(databasePath)) {
@@ -97,6 +143,12 @@ try {
     }
     chmodSync(storageDir, 0o700);
     chmodSync(resolve(storageDir, "openvc.sqlite"), 0o600);
+    if (existsSync(resolve(storageDir, "connector-secrets.key"))) {
+      chmodSync(resolve(storageDir, "connector-secrets.key"), 0o600);
+    }
+    if (existsSync(resolve(storageDir, "uploads"))) {
+      secureExtractedTree(resolve(storageDir, "uploads"));
+    }
   } catch (error) {
     rmSync(storageDir, { recursive: true, force: true });
     if (existsSync(previousDirectory)) renameSync(previousDirectory, storageDir);

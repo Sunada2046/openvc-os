@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import {
@@ -12,7 +13,7 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
-import { basename, dirname, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { hash as hashPassword, verify as verifyPassword } from "@node-rs/argon2";
@@ -54,6 +55,29 @@ const maxLoginFailureEntries = 10_000;
 const maxObjectDataBytes = 1024 * 1024;
 const maxConnectorManifestBytes = 128 * 1024;
 const maxSecretBytes = 64 * 1024;
+const maxPasswordBytes = 1024;
+const maxFieldDefinitionBytes = 128 * 1024;
+const configuredSetupToken = String(process.env.OPENVC_SETUP_TOKEN || "").trim();
+let setupToken = configuredSetupToken || randomBytes(32).toString("base64url");
+const generatedSetupToken = !configuredSetupToken;
+const uploadStoragePath = relative(storageDir, uploadDir);
+
+if (uploadStoragePath.startsWith("..") || isAbsolute(uploadStoragePath)) {
+  throw new Error("OPENVC_UPLOAD_DIR must remain inside OPENVC_STORAGE_DIR.");
+}
+
+if (!isLoopbackHostname(host)) {
+  if (!cookieSecure) {
+    throw new Error(
+      "Non-loopback API binding requires OPENVC_COOKIE_SECURE=true and HTTPS termination.",
+    );
+  }
+  if (allowedOrigins.size === 0) {
+    throw new Error(
+      "Non-loopback API binding requires an explicit OPENVC_ALLOWED_ORIGINS allowlist.",
+    );
+  }
+}
 
 for (const directory of [storageDir, dirname(dbPath), uploadDir]) {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -62,6 +86,11 @@ for (const directory of [storageDir, dirname(dbPath), uploadDir]) {
 
 const db = new DatabaseSync(dbPath);
 db.exec(readFileSync(resolve(root, "packages/db/schema.sql"), "utf8"));
+if (typeof db.enableDefensive === "function") {
+  db.enableDefensive(true);
+} else {
+  db.exec("PRAGMA trusted_schema = OFF;");
+}
 chmodSync(dbPath, 0o600);
 
 const permissions = [
@@ -159,20 +188,49 @@ function safeJson(value, fallback = {}) {
   }
 }
 
+function safeObjectJson(value) {
+  const parsed = safeJson(value);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
 function isLoopback(request) {
   const address = String(request.socket.remoteAddress || "");
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function isLoopbackHostname(value) {
+  return ["127.0.0.1", "::1", "[::1]", "localhost"].includes(
+    String(value || "").toLowerCase(),
+  );
 }
 
 function parseCookies(header = "") {
   return Object.fromEntries(
     header.split(";").map((part) => part.trim()).filter(Boolean).map((part) => {
       const index = part.indexOf("=");
-      return index < 0
-        ? [part, ""]
-        : [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+      if (index < 0) return [part, ""];
+      try {
+        return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+      } catch {
+        return [part.slice(0, index), ""];
+      }
     }),
   );
+}
+
+function requestOriginAllowed(request) {
+  const origin = String(request.headers.origin || "");
+  if (!origin) return true;
+  if (allowedOrigins.has(origin)) return true;
+  try {
+    const originUrl = new URL(origin);
+    const requestHost = String(request.headers.host || "").toLowerCase();
+    if (originUrl.host.toLowerCase() !== requestHost) return false;
+    if (!isLoopbackHostname(host)) return true;
+    return isLoopbackHostname(originUrl.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function securityHeaders(request) {
@@ -202,19 +260,31 @@ function sendJson(request, response, status, payload, extraHeaders = {}) {
   response.end(JSON.stringify(payload));
 }
 
-async function readJson(request) {
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
+async function readJson(request, limit = maxBodyBytes) {
+  const declaredLength = Number(request.headers["content-length"] || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > limit) {
+    throw new HttpError(413, "Request body is too large.");
+  }
   const chunks = [];
   let bytes = 0;
   for await (const chunk of request) {
     bytes += chunk.length;
-    if (bytes > maxBodyBytes) throw new Error("Request body is too large.");
+    if (bytes > limit) throw new HttpError(413, "Request body is too large.");
     chunks.push(chunk);
   }
   if (!chunks.length) return {};
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
-    throw new Error("Request body must be valid JSON.");
+    throw new HttpError(400, "Request body must be valid JSON.");
   }
 }
 
@@ -236,8 +306,10 @@ function audit(principal, action, targetType, targetId = "", metadata = {}, resu
 }
 
 function passwordError(password) {
-  if (String(password).length < 12) return "Password must contain at least 12 characters.";
-  if (!/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
+  const value = String(password || "");
+  if (Buffer.byteLength(value) > maxPasswordBytes) return "Password is too long.";
+  if (value.length < 12) return "Password must contain at least 12 characters.";
+  if (!/[A-Z]/.test(value) || !/[a-z]/.test(value) || !/\d/.test(value)) {
     return "Password must include uppercase, lowercase, and numeric characters.";
   }
   return "";
@@ -263,8 +335,8 @@ function principalForAccount(accountId) {
     SELECT roles.code, roles.name, roles.permissions_json
     FROM roles
     JOIN account_roles ON account_roles.role_id = roles.id
-    WHERE account_roles.account_id = ?
-  `).all(accountId);
+    WHERE account_roles.account_id = ? AND roles.organization_id = ?
+  `).all(accountId, account.organization_id);
   return {
     accountId: account.id,
     organizationId: account.organization_id,
@@ -324,7 +396,43 @@ function pruneLoginFailures(now = Date.now()) {
   }
 }
 
+function loginFailureKeys(request, email) {
+  const address = String(request.socket.remoteAddress || "unknown");
+  return [`ip:${sha256(address)}`, `email:${sha256(email)}`];
+}
+
+function blockedLoginFailure(keys) {
+  const now = Date.now();
+  return keys.some((key) => {
+    const failure = loginFailures.get(key);
+    return failure &&
+      failure.count >= maxLoginFailures &&
+      now - failure.firstAt < loginWindowMs;
+  });
+}
+
+function recordLoginFailure(keys) {
+  const now = Date.now();
+  for (const key of keys) {
+    const previous = loginFailures.get(key);
+    const current = previous && now - previous.firstAt < loginWindowMs
+      ? previous
+      : { count: 0, firstAt: now };
+    loginFailures.set(key, { ...current, count: current.count + 1 });
+  }
+}
+
 function createSession(request, accountId) {
+  const now = new Date().toISOString();
+  db.prepare("DELETE FROM sessions WHERE expires_at <= ? OR revoked_at IS NOT NULL").run(now);
+  db.prepare(`
+    UPDATE sessions SET revoked_at = CURRENT_TIMESTAMP
+    WHERE id IN (
+      SELECT id FROM sessions
+      WHERE account_id = ? AND revoked_at IS NULL
+      ORDER BY created_at DESC LIMIT -1 OFFSET 19
+    )
+  `).run(accountId);
   const token = randomBytes(32).toString("base64url");
   const csrf = randomBytes(24).toString("base64url");
   const expiresAt = new Date(Date.now() + sessionTtlMs).toISOString();
@@ -335,16 +443,90 @@ function createSession(request, accountId) {
   return { token, csrf, expiresAt };
 }
 
-function publicObject(row) {
+function fieldClassifications(organizationId, objectType) {
+  return new Map(db.prepare(`
+    SELECT field_key, classification
+    FROM field_definitions
+    WHERE organization_id = ? AND object_type = ?
+  `).all(organizationId, objectType).map((field) => [field.field_key, field.classification]));
+}
+
+function canViewClassification(principal, objectType, classification) {
+  if (["public", "internal"].includes(classification)) return true;
+  if (principal.permissions.includes("field.manage")) return true;
+  if (classification === "restricted") {
+    return principal.permissions.includes(`${objectType}.edit`) ||
+      principal.permissions.includes("data.restricted.view");
+  }
+  return principal.permissions.includes("data.confidential.view");
+}
+
+function visibleObjectData(row, principal, classifications = null) {
+  const fields = classifications ||
+    fieldClassifications(principal.organizationId, row.object_type);
+  return Object.fromEntries(
+    Object.entries(safeObjectJson(row.data_json)).filter(([key]) =>
+      canViewClassification(
+        principal,
+        row.object_type,
+        fields.get(key) || "internal",
+      )),
+  );
+}
+
+function protectedObjectData(principal, objectType, nextData, currentData = {}) {
+  const classifications = fieldClassifications(principal.organizationId, objectType);
+  const protectedKeys = Array.from(classifications.entries())
+    .filter(([, classification]) =>
+      !canViewClassification(principal, objectType, classification))
+    .map(([key]) => key);
+  if (protectedKeys.some((key) => Object.hasOwn(nextData, key))) {
+    return { error: "One or more field values are not editable by this account." };
+  }
+  const merged = { ...nextData };
+  for (const key of protectedKeys) {
+    if (Object.hasOwn(currentData, key)) merged[key] = currentData[key];
+  }
+  return { data: merged };
+}
+
+function publicObject(row, principal, includeData = true, classifications = null) {
   return {
     id: row.id,
     objectType: row.object_type,
     name: row.name,
     status: row.status,
-    data: safeJson(row.data_json),
+    data: includeData ? visibleObjectData(row, principal, classifications) : {},
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function containsCredentialMaterial(value) {
+  const sensitiveKeys = new Set([
+    "apikey", "accesstoken", "refreshtoken", "token", "password", "passwd",
+    "secret", "clientsecret", "credential", "credentials", "authorization",
+    "privatekey", "accesskey", "authheader",
+  ]);
+  const pending = [value];
+  while (pending.length) {
+    const current = pending.pop();
+    if (typeof current === "string") {
+      if (
+        /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i.test(current) ||
+        /^\s*(?:Bearer|Basic)\s+\S+/i.test(current) ||
+        /\b(?:sk-|AIza|xox[baprs]-|AKIA|gh[pousr]_|npm_)[A-Za-z0-9_-]{16,}\b/.test(current) ||
+        /\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\b/.test(current)
+      ) return true;
+      continue;
+    }
+    if (!current || typeof current !== "object") continue;
+    for (const [key, child] of Object.entries(current)) {
+      if (sensitiveKeys.has(key.replace(/[^a-z0-9]/gi, "").toLowerCase())) return true;
+      pending.push(child);
+    }
+  }
+  return false;
 }
 
 function sanitizeName(value) {
@@ -379,6 +561,7 @@ function encryptSecret(value) {
 function setupStatus() {
   return {
     setupRequired: Number(db.prepare("SELECT COUNT(*) AS count FROM accounts").get().count) === 0,
+    setupTokenRequired: true,
     network: {
       boundToLoopback: host === "127.0.0.1" || host === "::1" || host === "localhost",
       outboundConnectionsEnabledByDefault: false,
@@ -395,12 +578,30 @@ async function bootstrap(request, response) {
     sendJson(request, response, 403, { error: "First-time setup is only available from this device." });
     return;
   }
-  const input = await readJson(request);
+  const input = await readJson(request, 16 * 1024);
   const organizationName = String(input.organizationName || "").trim();
   const adminName = String(input.adminName || "").trim();
   const email = normalizeEmail(input.email);
   const invalidPassword = passwordError(input.password);
-  if (!organizationName || !adminName || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || invalidPassword) {
+  const suppliedSetupToken = String(input.setupToken || "");
+  if (
+    Buffer.byteLength(suppliedSetupToken) > maxPasswordBytes ||
+    !equalHash(sha256(suppliedSetupToken), sha256(setupToken))
+  ) {
+    sendJson(request, response, 403, { error: "A valid one-time setup token is required." });
+    return;
+  }
+  if (
+    !organizationName ||
+    organizationName.length > 200 ||
+    /[\u0000-\u001F\u007F]/u.test(organizationName) ||
+    !adminName ||
+    adminName.length > 200 ||
+    /[\u0000-\u001F\u007F]/u.test(adminName) ||
+    email.length > 254 ||
+    !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ||
+    invalidPassword
+  ) {
     sendJson(request, response, 400, {
       error: invalidPassword || "Organization, administrator name, and a valid email are required.",
     });
@@ -443,6 +644,7 @@ async function bootstrap(request, response) {
   const principal = principalForAccount(accountId);
   audit(principal, "system.setup.completed", "organization", organizationId);
   const session = createSession(request, accountId);
+  setupToken = randomBytes(32).toString("base64url");
   sendJson(request, response, 201, {
     authenticated: true,
     account: principal,
@@ -452,13 +654,22 @@ async function bootstrap(request, response) {
 }
 
 async function login(request, response) {
-  const input = await readJson(request);
+  const input = await readJson(request, 16 * 1024);
   const email = normalizeEmail(input.email);
+  if (email.length > 254 || Buffer.byteLength(String(input.password || "")) > maxPasswordBytes) {
+    sendJson(request, response, 400, { error: "A valid email and password are required." });
+    return;
+  }
   pruneLoginFailures();
-  const key = `${request.socket.remoteAddress || ""}:${sha256(email)}`;
-  const failure = loginFailures.get(key);
-  if (failure && failure.count >= maxLoginFailures && Date.now() - failure.firstAt < loginWindowMs) {
-    sendJson(request, response, 429, { error: "Too many login attempts. Try again later." });
+  const failureKeys = loginFailureKeys(request, email);
+  if (blockedLoginFailure(failureKeys)) {
+    sendJson(
+      request,
+      response,
+      429,
+      { error: "Too many login attempts. Try again later." },
+      { "Retry-After": String(Math.ceil(loginWindowMs / 1000)) },
+    );
     return;
   }
   const account = db.prepare("SELECT * FROM accounts WHERE email = ?").get(email);
@@ -476,14 +687,11 @@ async function login(request, response) {
     passwordMatches,
   );
   if (!valid) {
-    const current = failure && Date.now() - failure.firstAt < loginWindowMs
-      ? failure
-      : { count: 0, firstAt: Date.now() };
-    loginFailures.set(key, { ...current, count: current.count + 1 });
+    recordLoginFailure(failureKeys);
     sendJson(request, response, 401, { error: "Email or password is incorrect." });
     return;
   }
-  loginFailures.delete(key);
+  for (const key of failureKeys) loginFailures.delete(key);
   const principal = principalForAccount(account.id);
   const session = createSession(request, account.id);
   audit(principal, "auth.login", "account", account.id);
@@ -497,6 +705,14 @@ async function login(request, response) {
 
 async function route(request, response) {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+
+  if (
+    !requestOriginAllowed(request) &&
+    !["GET", "HEAD"].includes(request.method || "")
+  ) {
+    sendJson(request, response, 403, { error: "Request origin is not allowed." });
+    return;
+  }
 
   if (request.method === "OPTIONS") {
     sendJson(request, response, 204, {}, {
@@ -575,12 +791,18 @@ async function route(request, response) {
     }
     const auth = requirePermission(request, response, `${type}.view`);
     if (!auth) return;
+    const requestedLimit = Number(url.searchParams.get("limit") || 100);
+    const limit = Number.isSafeInteger(requestedLimit)
+      ? Math.min(Math.max(requestedLimit, 1), 100)
+      : 100;
     const rows = db.prepare(`
       SELECT * FROM objects
       WHERE organization_id = ? AND object_type = ? AND deleted_at IS NULL
-      ORDER BY updated_at DESC LIMIT 500
-    `).all(auth.principal.organizationId, type);
-    sendJson(request, response, 200, { items: rows.map(publicObject) });
+      ORDER BY updated_at DESC LIMIT ?
+    `).all(auth.principal.organizationId, type, limit);
+    sendJson(request, response, 200, {
+      items: rows.map((row) => publicObject(row, auth.principal, false)),
+    });
     return;
   }
   if (objectCollection && request.method === "POST") {
@@ -591,14 +813,24 @@ async function route(request, response) {
     }
     const auth = requirePermission(request, response, `${type}.edit`);
     if (!auth || !requireCsrf(request, response, auth)) return;
-    const input = await readJson(request);
+    const input = await readJson(request, 2 * 1024 * 1024);
     const name = String(input.name || "").trim();
     const status = String(input.status || "active").trim();
     const data = input.data && typeof input.data === "object" && !Array.isArray(input.data)
       ? input.data
       : {};
-    const serializedData = JSON.stringify(data);
-    if (!name || name.length > 200 || !/^[^\u0000-\u001F\u007F]{1,64}$/u.test(status)) {
+    const protectedData = protectedObjectData(auth.principal, type, data);
+    if (protectedData.error) {
+      sendJson(request, response, 403, { error: protectedData.error });
+      return;
+    }
+    const serializedData = JSON.stringify(protectedData.data);
+    if (
+      !name ||
+      name.length > 200 ||
+      /[\u0000-\u001F\u007F]/u.test(name) ||
+      !/^[^\u0000-\u001F\u007F]{1,64}$/u.test(status)
+    ) {
       sendJson(request, response, 400, { error: "A valid name and status are required." });
       return;
     }
@@ -622,26 +854,31 @@ async function route(request, response) {
     );
     audit(auth.principal, "object.created", type, id);
     const row = db.prepare("SELECT * FROM objects WHERE id = ?").get(id);
-    sendJson(request, response, 201, { item: publicObject(row) });
+    sendJson(request, response, 201, { item: publicObject(row, auth.principal) });
     return;
   }
 
   const objectItem = url.pathname.match(/^\/api\/objects\/([^/]+)\/([^/]+)$/);
-  if (objectItem && ["PATCH", "DELETE"].includes(request.method)) {
+  if (objectItem && ["GET", "PATCH", "DELETE"].includes(request.method)) {
     const type = decodeURIComponent(objectItem[1]);
     const id = decodeURIComponent(objectItem[2]);
     if (!objectTypes.has(type)) {
       sendJson(request, response, 404, { error: "Unknown object type." });
       return;
     }
-    const auth = requirePermission(request, response, `${type}.edit`);
-    if (!auth || !requireCsrf(request, response, auth)) return;
+    const permission = request.method === "GET" ? `${type}.view` : `${type}.edit`;
+    const auth = requirePermission(request, response, permission);
+    if (!auth || (request.method !== "GET" && !requireCsrf(request, response, auth))) return;
     const current = db.prepare(`
       SELECT * FROM objects
       WHERE id = ? AND organization_id = ? AND object_type = ? AND deleted_at IS NULL
     `).get(id, auth.principal.organizationId, type);
     if (!current) {
       sendJson(request, response, 404, { error: "Record not found." });
+      return;
+    }
+    if (request.method === "GET") {
+      sendJson(request, response, 200, { item: publicObject(current, auth.principal) });
       return;
     }
     if (request.method === "DELETE") {
@@ -651,15 +888,16 @@ async function route(request, response) {
       sendJson(request, response, 200, { ok: true });
       return;
     }
-    const input = await readJson(request);
+    const input = await readJson(request, 2 * 1024 * 1024);
     const nextName = input.name === undefined ? current.name : String(input.name).trim();
     const nextStatus = input.status === undefined ? current.status : String(input.status).trim();
     const nextData = input.data === undefined
-      ? safeJson(current.data_json)
+      ? safeObjectJson(current.data_json)
       : input.data;
     if (
       !nextName ||
       nextName.length > 200 ||
+      /[\u0000-\u001F\u007F]/u.test(nextName) ||
       !/^[^\u0000-\u001F\u007F]{1,64}$/u.test(nextStatus) ||
       !nextData ||
       typeof nextData !== "object" ||
@@ -668,7 +906,17 @@ async function route(request, response) {
       sendJson(request, response, 400, { error: "A valid name, status, and data object are required." });
       return;
     }
-    const serializedData = JSON.stringify(nextData);
+    const protectedData = protectedObjectData(
+      auth.principal,
+      type,
+      nextData,
+      safeObjectJson(current.data_json),
+    );
+    if (protectedData.error) {
+      sendJson(request, response, 403, { error: protectedData.error });
+      return;
+    }
+    const serializedData = JSON.stringify(protectedData.data);
     if (Buffer.byteLength(serializedData) > maxObjectDataBytes) {
       sendJson(request, response, 413, { error: "Structured record data is too large." });
       return;
@@ -684,7 +932,10 @@ async function route(request, response) {
     );
     audit(auth.principal, "object.updated", type, id);
     sendJson(request, response, 200, {
-      item: publicObject(db.prepare("SELECT * FROM objects WHERE id = ?").get(id)),
+      item: publicObject(
+        db.prepare("SELECT * FROM objects WHERE id = ?").get(id),
+        auth.principal,
+      ),
     });
     return;
   }
@@ -697,7 +948,9 @@ async function route(request, response) {
       ORDER BY object_type, position, label
     `).all(auth.principal.organizationId);
     sendJson(request, response, 200, {
-      items: rows.map((row) => ({
+      items: rows.filter((row) =>
+        canViewClassification(auth.principal, row.object_type, row.classification))
+        .map((row) => ({
         id: row.id,
         objectType: row.object_type,
         fieldKey: row.field_key,
@@ -716,20 +969,44 @@ async function route(request, response) {
   if (request.method === "POST" && url.pathname === "/api/fields") {
     const auth = requirePermission(request, response, "field.manage");
     if (!auth || !requireCsrf(request, response, auth)) return;
-    const input = await readJson(request);
+    const input = await readJson(request, 256 * 1024);
     const allowedDataTypes = new Set([
       "text", "long_text", "number", "currency", "percent", "date",
       "datetime", "boolean", "single_select", "multi_select",
       "relation", "attachment", "url", "email", "formula",
     ]);
     const allowedClassifications = new Set(["public", "internal", "restricted", "confidential"]);
+    const label = String(input.label || input.fieldKey || "").trim();
+    const options = Array.isArray(input.options) ? input.options : [];
+    const formulaExpression = String(input.formulaExpression || "");
+    const relationTargetType = String(input.relationTargetType || "");
+    const serializedOptions = JSON.stringify(options);
+    const serializedDefinition = JSON.stringify({
+      label,
+      options,
+      formulaExpression,
+      relationTargetType,
+    });
+    const position = Number(input.position ?? 100);
     if (
       !objectTypes.has(input.objectType) ||
       !/^[a-z][a-z0-9_]{1,63}$/.test(input.fieldKey || "") ||
       !allowedDataTypes.has(input.dataType || "text") ||
-      !allowedClassifications.has(input.classification || "internal")
+      !allowedClassifications.has(input.classification || "internal") ||
+      !label ||
+      label.length > 120 ||
+      /[\u0000-\u001F\u007F]/u.test(label) ||
+      formulaExpression.length > 4096 ||
+      (
+        input.dataType === "relation" &&
+        !objectTypes.has(relationTargetType)
+      ) ||
+      !Number.isSafeInteger(position) ||
+      position < -100_000 ||
+      position > 100_000 ||
+      Buffer.byteLength(serializedDefinition) > maxFieldDefinitionBytes
     ) {
-      sendJson(request, response, 400, { error: "A valid object type and field key are required." });
+      sendJson(request, response, 400, { error: "A valid, bounded field definition is required." });
       return;
     }
     const id = createId("field");
@@ -744,14 +1021,14 @@ async function route(request, response) {
       auth.principal.organizationId,
       input.objectType,
       input.fieldKey,
-      String(input.label || input.fieldKey).trim(),
+      label,
       input.dataType || "text",
       input.classification || "internal",
       input.required ? 1 : 0,
-      JSON.stringify(Array.isArray(input.options) ? input.options : []),
-      input.formulaExpression || null,
-      input.relationTargetType || null,
-      Number(input.position || 100),
+      serializedOptions,
+      formulaExpression || null,
+      relationTargetType || null,
+      position,
     );
     audit(auth.principal, "field.created", "field", id);
     sendJson(request, response, 201, { id });
@@ -781,22 +1058,35 @@ async function route(request, response) {
   if (request.method === "POST" && url.pathname === "/api/connectors") {
     const auth = requirePermission(request, response, "connector.manage");
     if (!auth || !requireCsrf(request, response, auth)) return;
-    const input = await readJson(request);
+    const input = await readJson(request, 256 * 1024);
     const name = String(input.name || "").trim();
     const connectorType = String(input.connectorType || "custom").trim();
-    if (!name || name.length > 120 || !/^[a-z][a-z0-9_-]{1,63}$/.test(connectorType)) {
+    if (
+      !name ||
+      name.length > 120 ||
+      /[\u0000-\u001F\u007F]/u.test(name) ||
+      !/^[a-z][a-z0-9_-]{1,63}$/.test(connectorType) ||
+      (
+        input.manifest !== undefined &&
+        (!input.manifest || typeof input.manifest !== "object" || Array.isArray(input.manifest))
+      )
+    ) {
       sendJson(request, response, 400, {
         error: "A connector name and a valid lowercase connector type are required.",
       });
       return;
     }
-    const manifest = input.manifest && typeof input.manifest === "object" ? input.manifest : {};
+    const manifest = input.manifest &&
+      typeof input.manifest === "object" &&
+      !Array.isArray(input.manifest)
+      ? input.manifest
+      : {};
     const serialized = JSON.stringify(manifest);
     if (Buffer.byteLength(serialized) > maxConnectorManifestBytes) {
       sendJson(request, response, 413, { error: "Connector manifest is too large." });
       return;
     }
-    if (/api.?key|password|secret|access.?token|refresh.?token/i.test(serialized)) {
+    if (containsCredentialMaterial(manifest)) {
       sendJson(request, response, 400, {
         error: "Connector manifests must not contain credentials. Add secrets separately.",
       });
@@ -832,7 +1122,7 @@ async function route(request, response) {
       sendJson(request, response, 404, { error: "Connector not found." });
       return;
     }
-    const input = await readJson(request);
+    const input = await readJson(request, 128 * 1024);
     const secretName = String(input.name || "").trim();
     const secretValue = String(input.value || "");
     if (
@@ -862,21 +1152,30 @@ async function route(request, response) {
     const encoded = String(input.contentBase64 || "");
     const validBase64 = encoded.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(encoded);
     const bytes = validBase64 ? Buffer.from(encoded, "base64") : Buffer.alloc(0);
+    const canonicalBase64 = validBase64 && bytes.toString("base64") === encoded;
     const objectId = input.objectId ? String(input.objectId) : null;
+    const fileName = String(input.fileName || "");
+    const mediaType = String(input.mediaType || "application/octet-stream");
     if (objectId) {
       const object = db.prepare(`
-        SELECT id FROM objects
+        SELECT id, object_type FROM objects
         WHERE id = ? AND organization_id = ? AND deleted_at IS NULL
       `).get(objectId, auth.principal.organizationId);
-      if (!object) {
+      if (
+        !object ||
+        !auth.principal.permissions.includes(`${object.object_type}.view`)
+      ) {
         sendJson(request, response, 404, { error: "Related record not found." });
         return;
       }
     }
     if (
-      !input.fileName ||
-      String(input.fileName).length > 200 ||
-      !validBase64 ||
+      !fileName ||
+      fileName.length > 200 ||
+      /[\u0000-\u001F\u007F]/u.test(fileName) ||
+      !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i.test(mediaType) ||
+      mediaType.length > 255 ||
+      !canonicalBase64 ||
       !bytes.length ||
       bytes.length > 25 * 1024 * 1024
     ) {
@@ -887,27 +1186,32 @@ async function route(request, response) {
     const organizationDirectory = resolve(uploadDir, auth.principal.organizationId);
     mkdirSync(organizationDirectory, { recursive: true, mode: 0o700 });
     chmodSync(organizationDirectory, 0o700);
-    const path = resolve(organizationDirectory, `${id}-${sanitizeName(input.fileName)}`);
+    const path = resolve(organizationDirectory, `${id}-${sanitizeName(fileName)}`);
     writeFileSync(path, bytes, { mode: 0o600 });
     chmodSync(path, 0o600);
-    db.prepare(`
-      INSERT INTO documents (
-        id, organization_id, object_id, title, media_type, byte_size,
-        storage_path, sha256, uploaded_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      auth.principal.organizationId,
-      objectId,
-      String(input.fileName),
-      String(input.mediaType || "application/octet-stream"),
-      bytes.length,
-      relative(storageDir, path),
-      sha256(bytes),
-      auth.principal.accountId,
-    );
+    try {
+      db.prepare(`
+        INSERT INTO documents (
+          id, organization_id, object_id, title, media_type, byte_size,
+          storage_path, sha256, uploaded_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        auth.principal.organizationId,
+        objectId,
+        fileName,
+        mediaType,
+        bytes.length,
+        relative(storageDir, path),
+        sha256(bytes),
+        auth.principal.accountId,
+      );
+    } catch (error) {
+      unlinkSync(path);
+      throw error;
+    }
     audit(auth.principal, "document.uploaded", "document", id, { byteSize: bytes.length });
-    sendJson(request, response, 201, { id, title: input.fileName, byteSize: bytes.length });
+    sendJson(request, response, 201, { id, title: fileName, byteSize: bytes.length });
     return;
   }
 
@@ -938,11 +1242,26 @@ async function route(request, response) {
 
 const server = createServer((request, response) => {
   route(request, response).catch((error) => {
-    console.error(error);
-    sendJson(request, response, 500, { error: "Internal server error." });
+    console.error("Request failed.", {
+      method: request.method,
+      path: String(request.url || "").split("?")[0],
+      errorType: error instanceof Error ? error.name : "UnknownError",
+    });
+    const status = error instanceof HttpError ? error.status : 500;
+    sendJson(request, response, status, {
+      error: error instanceof HttpError ? error.message : "Internal server error.",
+    });
   });
 });
 
+server.requestTimeout = 30_000;
+server.headersTimeout = 15_000;
+server.keepAliveTimeout = 5_000;
+server.maxRequestsPerSocket = 100;
+
 server.listen(port, host, () => {
   console.log(`OpenVC OS API listening on http://${host}:${port}`);
+  if (setupStatus().setupRequired && generatedSetupToken) {
+    console.log(`One-time setup token: ${setupToken}`);
+  }
 });

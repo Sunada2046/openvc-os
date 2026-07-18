@@ -93,6 +93,27 @@ try {
       .run("account_b", "object_a"),
     /same organization/,
   );
+  db.prepare(`
+    INSERT INTO audit_logs (
+      id, organization_id, actor_account_id, action, target_type
+    ) VALUES ('audit_local', 'org_a', 'account_a', 'test', 'test')
+  `).run();
+  assert.throws(
+    () => db.prepare("UPDATE audit_logs SET action = 'rewritten' WHERE id = 'audit_local'").run(),
+    /append-only/,
+  );
+  assert.throws(
+    () => db.prepare(`
+      UPDATE audit_logs
+      SET organization_id = NULL, actor_account_id = NULL
+      WHERE id = 'audit_local'
+    `).run(),
+    /append-only/,
+  );
+  assert.throws(
+    () => db.prepare("DELETE FROM audit_logs WHERE id = 'audit_local'").run(),
+    /append-only/,
+  );
   db.close();
   console.log(
     "Tenant isolation test passed: cross-organization inserts and updates are rejected by SQLite.",

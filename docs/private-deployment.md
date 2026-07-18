@@ -24,6 +24,12 @@ application behind a trusted reverse proxy with:
 - centralized monitoring without business payload logging;
 - tested recovery and incident-response procedures.
 
+The API refuses to bind a non-loopback address unless both
+`OPENVC_COOKIE_SECURE=true` and a non-empty `OPENVC_ALLOWED_ORIGINS` allowlist
+are configured. This check does not provide TLS by itself; terminate HTTPS at
+the reverse proxy and forward only from that trusted proxy. Prefer keeping the
+API on `127.0.0.1` even in a network deployment.
+
 Network deployment should add database-level encryption or move to a managed
 database with encrypted storage, key rotation, and point-in-time recovery.
 
